@@ -91,12 +91,22 @@ try:
     if torch.cuda.is_available():
         gpu = torch.cuda.get_device_name(0)
         gb  = torch.cuda.get_device_properties(0).total_memory / 1e9
+        cap = torch.cuda.get_device_capability(0)
         print(f"CUDA        : {torch.version.cuda}")
-        print(f"GPU         : {gpu}")
+        print(f"GPU         : {gpu}  (sm_{cap[0]}{cap[1]})")
         print(f"GPU memory  : {gb:.1f} GB")
-        if not any(x in gpu for x in ("H100", "H200", "A100")):
-            print("WARNING     : not on H100/H200/A100. Batch sizes in "
-                  "configs/default.yaml may need lowering for smaller cards.")
+        # Memory is the actual constraint for default batch sizes, not card
+        # family. The reranker peaks around 15 GB at batch_size=128; ≥40 GB
+        # leaves comfortable headroom on every datacenter-class GPU
+        # (A100 40/80, H100, H200, L40S, RTX 6000 Ada, Blackwell, ...).
+        if gb >= 40:
+            print("GPU check   : OK (≥40 GB; default batch sizes safe)")
+        elif gb >= 24:
+            print(f"WARNING     : {gb:.1f} GB GPU. Default rerankers.bge.batch_size=128 "
+                  "may OOM under load; consider 32-64 in configs/default.yaml.")
+        else:
+            print(f"WARNING     : {gb:.1f} GB GPU is small. Lower "
+                  "rerankers.bge.batch_size to 8 in configs/default.yaml.")
     else:
         print("!! WARNING  : no CUDA. The reranker pass would take days on CPU.")
 except ImportError:

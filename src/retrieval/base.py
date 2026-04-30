@@ -184,27 +184,42 @@ class VoyageEmbedder(BaseEmbedder):
 class LocalEmbedder(BaseEmbedder):
     """Local sentence-transformers embedder (BGE-M3, E5, etc.).
 
-    Batch sizes auto-scale by device:
-      - CUDA (e.g. H100/H200/A100): docs=64, queries=128
-      - MPS / CPU: docs=8, queries=32 (preserves prior MPS-tuned defaults)
+    Default ``max_seq_length=8192`` matches BGE-M3's native maximum and the
+    ~8191-token context that ``text-embedding-3-large`` accepts via the
+    OpenAI API. Pass ``max_seq_length`` via config to override (e.g. 512 for
+    bge-large-en or 4096 for tighter memory).
+
+    Batch sizes auto-scale by device and sequence length:
+      - CUDA, max_seq_length > 4096: docs=8, queries=128
+      - CUDA, max_seq_length <= 4096: docs=64, queries=128
+      - MPS / CPU: docs=8, queries=32
+    Sentence-transformers pads each batch to the longest sample in that
+    batch (not to ``max_seq_length``), so most batches over the
+    T²-RAGBench corpus run well below peak memory.
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-m3", max_seq_length: int = 1024):
+    def __init__(self, model_name: str = "BAAI/bge-m3", max_seq_length: int = 8192):
         from sentence_transformers import SentenceTransformer
         self.model = SentenceTransformer(model_name)
-        # Don't exceed the model's native maximum (e.g. BGE-large-en caps at 512)
+        # Don't exceed the model's native maximum (e.g. bge-large-en caps at 512).
+        # Most modern dense encoders have native maxes set on load:
+        #   BGE-M3: 8192, text-embedding-3-large: 8191 (API), bge-large-en: 512.
         native_max = getattr(self.model, "max_seq_length", max_seq_length)
         self.model.max_seq_length = min(max_seq_length, native_max)
         self._dimension = self.model.get_sentence_embedding_dimension()
 
-        # Auto-scale batch sizes for the active device. CUDA gets the H100-tuned
-        # values; MPS/CPU keep the prior conservative defaults.
+        # Auto-scale batch sizes for the active device. Long sequences (>4096
+        # tokens) get a smaller docs_batch on CUDA so attention activations stay
+        # within the memory budget on a 40-100 GB datacenter card.
         try:
             import torch
             self._on_cuda = torch.cuda.is_available()
         except ImportError:
             self._on_cuda = False
-        self._docs_batch = 64 if self._on_cuda else 8
+        if self._on_cuda:
+            self._docs_batch = 8 if self.model.max_seq_length > 4096 else 64
+        else:
+            self._docs_batch = 8
         self._queries_batch = 128 if self._on_cuda else 32
 
         logger.info(
@@ -212,6 +227,11 @@ class LocalEmbedder(BaseEmbedder):
             f"max_seq={self.model.max_seq_length}, "
             f"docs_batch={self._docs_batch}, queries_batch={self._queries_batch}"
         )
+
+    @property
+    def max_seq_length(self) -> int:
+        """The actual max_seq_length applied at encode time (post-cap)."""
+        return int(self.model.max_seq_length)
 
     @property
     def dimension(self) -> int:
@@ -244,6 +264,9 @@ def create_embedder(config: dict) -> BaseEmbedder:
     elif provider == "voyage":
         return VoyageEmbedder(config["model"], config.get("dimensions", 1024))
     elif provider == "local":
-        return LocalEmbedder(config["model"])
+        return LocalEmbedder(
+            config["model"],
+            max_seq_length=config.get("max_seq_length", 8192),
+        )
     else:
         raise ValueError(f"Unknown embedding provider: {provider}")

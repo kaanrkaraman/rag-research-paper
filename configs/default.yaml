@@ -23,10 +23,16 @@ embedding_models:
     provider: "local"
     model: "BAAI/bge-m3"
     dimensions: 1024
+    # 8192 = BGE-M3 native max; matches the ~8191-token context that
+    # text-embedding-3-large accepts via the OpenAI API. Required for an
+    # apples-to-apples encoder comparison on T²-RAGBench (mean doc 920 tokens
+    # but the long tail in TAT-DQA exceeds 1024).
+    max_seq_length: 8192
   bge_large_en:
     provider: "local"
     model: "BAAI/bge-large-en-v1.5"
     dimensions: 1024
+    max_seq_length: 512  # bge-large-en's native max
 
 rerankers:
   cohere:

@@ -1,25 +1,31 @@
 # Pinned dependencies for the BGE-M3 H100 reproducibility run.
 #
-# Usage on a fresh Lambda Labs / Vast.ai / RunPod H100 / H200 instance:
+# Usage on a fresh Lambda Labs / Vast.ai / RunPod / Colab H100, H200, A100,
+# RTX 6000, or RTX Pro 6000 Blackwell instance:
 #     pip install -r requirements-h100.txt
 #     pip install -e .            # exposes src/ to sys.path
 #
 # Notes:
-# - PyTorch is installed from the cu124 wheel index. If the rented host
-#   ships CUDA 12.1 instead of 12.4, swap the index URL to cu121.
+# - We do NOT pin torch / torchvision here. Hosts already ship a working
+#   pair (Colab ships torch 2.10+cu128, Lambda ships torch 2.6+cu124, etc.)
+#   and re-pinning is the fastest way to desynchronize torch and torchvision.
+#   The C-ABI compatibility error we hit looks like:
+#       RuntimeError: operator torchvision::nms does not exist
+#   If the host has no torch at all, install both from the same wheel index:
+#       pip install torch torchvision \
+#           --index-url https://download.pytorch.org/whl/cu128
 # - faiss-cpu is intentional: FAISS search over 7,318 docs is CPU-fast and
 #   faiss-gpu has flaky CUDA 12 wheels at the time of writing.
-# - sentence-transformers 3.x is required for the CrossEncoder.predict
-#   batch_size kwarg. 5.x also works but introduces minor API churn.
+# - sentence-transformers 3+ is required for the CrossEncoder.predict
+#   batch_size kwarg. 5.x and 6.x also work.
 
-# Pull torch/cu124 from the official index. Some hosts already have nvidia-cublas
-# pinned; if pip resolves a wrong cu version, force --extra-index-url.
---extra-index-url https://download.pytorch.org/whl/cu124
-torch>=2.4.0,<2.6.0
-
-# ML stack
-sentence-transformers>=3.0.0,<6.0.0
-transformers>=4.45.0,<5.0.0
+# ML stack (no torch pin — host's existing torch+torchvision pair is trusted).
+# sentence-transformers <5 keeps the package text-only; 5+ pulls in torchcodec
+# which requires FFmpeg shared libs Colab doesn't ship. Our usage
+# (SentenceTransformer.encode + CrossEncoder.predict) is unchanged across 3-6,
+# so the lower-version pin is purely an environment-compat workaround.
+sentence-transformers>=3.0.0,<5.0.0
+transformers>=4.45.0
 faiss-cpu>=1.8.0,<1.14.0
 huggingface-hub>=0.24.0
 

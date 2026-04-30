@@ -30,7 +30,7 @@
 \maketitle
 
 \begin{abstract}
-A RAG pipeline is only as good as the documents it retrieves, yet retrieval on corpora that mix prose and tables has received little empirical study. MTEB and BEIR evaluate on homogeneous text, where dense retrieval generally wins; it is unclear how much of that ordering survives on documents whose answers live in table cells. We evaluate ten retrieval methods on T\textsuperscript{2}-RAGBench, a financial QA benchmark of 23,088 queries over 7,318 SEC-filing documents, and report Recall@$k$, MRR, nDCG, end-to-end Number Match, and paired bootstrap significance tests.
+A RAG pipeline is only as good as the documents it retrieves, yet retrieval on corpora that mix prose and tables has received little empirical study. MTEB and BEIR evaluate on homogeneous text, where dense retrieval generally wins; it is unclear how much of that ordering survives on documents whose answers live in table cells. We evaluate nine retrieval methods on T\textsuperscript{2}-RAGBench, a financial QA benchmark of 23,088 queries over 7,318 SEC-filing documents, plus an open-weight BGE-M3 stack as a robustness check on encoder choice, and report Recall@$k$, MRR, nDCG, end-to-end Number Match, and paired bootstrap significance tests.
 
 Four results stand out. BM25 beats \texttt{text-embedding-3-large} on nearly every metric, inverting the MTEB/BEIR ordering. Hybrid RRF followed by a cross-encoder reranker reaches Recall@5 = 0.816 and MRR@3 = 0.605, well ahead of any single-stage method. HyDE and multi-query expansion hurt rather than help: hallucinated numbers pull the query embedding away from documents with the exact figure. And of the 31\% of queries whose gold document is missed at rank 5, 73\% fail for the same reason---the answer is a table cell that the encoder cannot recover from linearized text. We release the evaluation code, prompts, FAISS indices, and per-query outputs.
 \end{abstract}
@@ -44,11 +44,11 @@ In a RAG system \citep{lewis2020rag}, a retriever supplies the context an LLM co
 \paragraph{The gap for text-and-table corpora.}
 That assumption breaks down on documents that mix prose and tables. Financial filings, earnings reports, and regulatory documents are built this way: the prose carries context, the tables carry the numbers. Answering \emph{``What was the 2019 year-over-year revenue growth?''} requires finding both the right document and the right cell inside it. The benchmarks most practitioners consult---MTEB \citep{muennighoff2023mteb} and BEIR \citep{thakur2021beir}---evaluate on homogeneous text, where dense retrieval usually outperforms sparse baselines. Whether that ordering survives a shift to heterogeneous documents is an open empirical question, and our main finding is that it does not.
 
-We use T\textsuperscript{2}-RAGBench \citep{strich2026t2ragbench}, a financial QA benchmark of 23{,}088 queries over 7{,}318 documents. The original paper evaluated six retrieval methods with two metrics; we evaluate ten methods and report the full retrieval and generation metric suite along with paired bootstrap significance tests.
+We use T\textsuperscript{2}-RAGBench \citep{strich2026t2ragbench}, a financial QA benchmark of 23{,}088 queries over 7{,}318 documents. The original paper evaluated six retrieval methods with two metrics; we evaluate nine methods plus an open-weight BGE-M3 robustness panel, and report the full retrieval and generation metric suite along with paired bootstrap significance tests.
 
 \paragraph{Contributions.}
 \begin{enumerate}
-    \item A head-to-head evaluation of ten retrieval methods on T\textsuperscript{2}-RAGBench, covering sparse, dense, hybrid, cross-encoder-reranked, query-side, index-side, and adaptive pipelines, with paired bootstrap significance tests.
+    \item A head-to-head evaluation of nine retrieval methods on T\textsuperscript{2}-RAGBench, covering sparse, dense, hybrid, cross-encoder-reranked, query-side, index-side, and adaptive pipelines, with paired bootstrap significance tests, plus an open-weight BGE-M3 stack as a robustness check on encoder choice.
     \item Evidence that rankings on MTEB and BEIR do not transfer to text-and-table data: BM25 beats a strong dense encoder (\texttt{text-embedding-3-large}) on nearly every metric.
     \item An error analysis of 100 sampled retrieval failures showing that 73\% stem from a single cause---the answer is a table cell that serialized-text encoders cannot locate---which we argue is the next concrete open problem in this area.
     \item Two negative results: HyDE and multi-query expansion degrade retrieval on numerical financial queries, and CRAG-style correction does not close the gap to hybrid fusion.
@@ -66,7 +66,7 @@ BM25 remains competitive in zero-shot settings \citep{thakur2021beir}. Dense dua
 HybridQA \citep{chen2020hybridqa} introduced multi-hop reasoning over linked tables and passages. In the financial domain, FinQA \citep{chen2021finqa}, TAT-QA \citep{zhu2021tatqa}, and ConvFinQA \citep{chen2022convfinqa} target numerical reasoning over hybrid contexts. A recent survey \citep{nan2025tableqasurvey} finds that retrieval of heterogeneous context remains the primary bottleneck.
 
 \paragraph{RAG benchmarks.}
-BEIR \citep{thakur2021beir} established zero-shot retrieval evaluation across 18 datasets. Recent RAG benchmarks include RGB \citep{chen2024rgb}, CRAG \citep{yang2024crag}, and RAGBench \citep{friel2024ragbench}. \citet{li2025ragbestpractices} study RAG design choices at COLING 2025. None focus on retrieval method comparison over documents with mixed text-and-table content. T\textsuperscript{2}-RAGBench \citep{strich2026t2ragbench} unifies FinQA, ConvFinQA, and TAT-DQA into 23,088 queries over 7,318 financial documents; where the original paper tested six methods with two metrics, we evaluate ten methods with a comprehensive set of retrieval and generation metrics.
+BEIR \citep{thakur2021beir} established zero-shot retrieval evaluation across 18 datasets. Recent RAG benchmarks include RGB \citep{chen2024rgb}, CRAG \citep{yang2024crag}, and RAGBench \citep{friel2024ragbench}. \citet{li2025ragbestpractices} study RAG design choices at COLING 2025. None focus on retrieval method comparison over documents with mixed text-and-table content. T\textsuperscript{2}-RAGBench \citep{strich2026t2ragbench} unifies FinQA, ConvFinQA, and TAT-DQA into 23,088 queries over 7,318 financial documents; where the original paper tested six methods with two metrics, we evaluate nine methods plus an open-weight BGE-M3 robustness panel, with a comprehensive set of retrieval and generation metrics.
 
 % ============================================================
 \section{Methodology}
@@ -80,7 +80,7 @@ T\textsuperscript{2}-RAGBench \citep{strich2026t2ragbench} contains 23,088 quest
 \subsection{Retrieval Methods}
 \label{sec:methods}
 
-We evaluate ten retrieval methods spanning five categories. Full hyperparameters are in Appendix~\ref{app:hyperparams}; prompt templates in Appendix~\ref{app:prompts}.
+We evaluate nine retrieval methods spanning five categories, plus three open-weight BGE-M3 configurations as a robustness check on encoder choice. Full hyperparameters are in Appendix~\ref{app:hyperparams}; prompt templates in Appendix~\ref{app:prompts}.
 
 \paragraph{BM25.} Okapi BM25 \citep{robertson1994okapi} with $k_1 = 1.2$, $b = 0.75$, providing strong lexical matching for domain-specific terminology.
 
@@ -98,6 +98,8 @@ We evaluate ten retrieval methods spanning five categories. Full hyperparameters
 
 \paragraph{CRAG.} Classifies retrieved documents as relevant/ambiguous/irrelevant; rewrites query and re-retrieves when confidence is low \citep{yan2024crag}.
 
+\paragraph{Open-weight BGE-M3 panel.} As a robustness check on encoder choice, we evaluate three additional configurations using the open-weight \texttt{BAAI/bge-m3} encoder (1024-d) \citep{chen2024bgem3} and the \texttt{BAAI/bge-reranker-v2-m3} cross-encoder: dense retrieval, hybrid RRF (BM25 + BGE-M3), and the corresponding two-stage Hybrid + BGE Rerank pipeline. Configuration details and the reranker context-length asymmetry are discussed in Section~\ref{sec:setup}.
+
 \subsection{Evaluation}
 \label{sec:metrics}
 
@@ -105,7 +107,7 @@ We evaluate ten retrieval methods spanning five categories. Full hyperparameters
 
 \paragraph{Setup.}
 \label{sec:setup}
-BM25 and FAISS run locally on Apple Silicon. Embedding, LLM, and reranking use Azure AI Foundry. All experiments use seed 42, temperature 0, and the standard train/test split. Code is publicly released \citep{karaman2026ragcode}.
+BM25 and FAISS run locally on Apple Silicon. Embedding, LLM, and reranking with \texttt{text-embedding-3-large} and Cohere Rerank use Azure AI Foundry. As an open-weight robustness check on encoder choice, we additionally evaluate \texttt{BAAI/bge-m3}~(1024-d) \citep{chen2024bgem3} and the \texttt{BAAI/bge-reranker-v2-m3} cross-encoder; both run locally on a single NVIDIA RTX PRO 6000 Blackwell (102~GB) as a fully-open-weights pipeline. Each model is configured at its officially recommended operating point: dense encoders at 8{,}192-token context (BGE-M3's native maximum and approximately the OpenAI API limit), Cohere Rerank v4.0 Pro at \texttt{max\_tokens\_per\_doc}=4{,}096 (default), and \texttt{bge-reranker-v2-m3} at \texttt{max\_length}=512 (the value used in every official example and at which the model was fine-tuned). Each candidate document is clipped to the first 4{,}096 characters before being passed to either reranker. Candidate pools are 50 (Cohere) and 60 (BGE), both well above the 20-candidate threshold below which reranker quality degrades sharply (Section~\ref{sec:ablations}). We do not artificially handicap one reranker to match the other's context window, since either choice would push at least one model outside its trained operating regime; we report both at their canonical defaults and disclose the asymmetry. Latency is reported only within hardware-matched comparisons. All experiments use seed 42, temperature 0, and the standard train/test split. Code is publicly released \citep{karaman2026ragcode}.
 
 % ============================================================
 \section{Results}
@@ -123,9 +125,11 @@ Table~\ref{tab:main_results} presents retrieval performance of all evaluated met
 \toprule
 \textbf{Category} & \textbf{Method} & \textbf{R@1} & \textbf{R@3} & \textbf{R@5} & \textbf{R@10} & \textbf{MRR@3} & \textbf{nDCG@10} & \textbf{MAP} \\
 \midrule
-\multirow{2}{*}{Single-method}
+\multirow{3}{*}{Single-method}
   & BM25 (sparse)               & 0.293 & 0.552 & 0.644 & 0.735 & 0.411 & 0.515 & 0.449 \\
   & Dense (text-embed-3-large)  & 0.248 & 0.481 & 0.587 & 0.703 & 0.351 & 0.466 & 0.398 \\
+  & Dense (BGE-M3)\textsuperscript{$\diamond$}
+                                & 0.225 & 0.425 & 0.508 & 0.597 & 0.315 & 0.406 & 0.351 \\
 \midrule
 \multirow{2}{*}{Query expansion}
   & HyDE (gpt-4.1-mini)        & 0.221 & 0.441 & 0.544 & 0.671 & 0.318 & 0.433 & 0.365 \\
@@ -137,13 +141,17 @@ Table~\ref{tab:main_results} presents retrieval performance of all evaluated met
 \midrule
 Adaptive & CRAG (gpt-4.1-mini)    & 0.302 & 0.556 & 0.658 & 0.788 & 0.415 & 0.536 & 0.456 \\
 \midrule
-\multirow{2}{*}{Fusion + rerank}
+\multirow{4}{*}{Fusion + rerank}
   & Hybrid (BM25+Dense, RRF)    & 0.308 & 0.588 & 0.695 & 0.801 & 0.433 & 0.551 & 0.477 \\
+  & Hybrid (BGE-M3, RRF)\textsuperscript{$\diamond$}
+                                & 0.286 & 0.538 & 0.633 & 0.733 & 0.399 & 0.507 & 0.440 \\
   & Hybrid + Cohere Rerank      & \textbf{0.472} & \textbf{0.758} & \textbf{0.816} & \textbf{0.861} & \textbf{0.605} & \textbf{0.683} & \textbf{0.625} \\
+  & Hybrid (BGE-M3) + BGE Rerank\textsuperscript{$\diamond$}
+                                & 0.301 & 0.537 & 0.611 & 0.693 & 0.409 & 0.499 & 0.442 \\
 \bottomrule
 \end{tabular}
 \vspace{4pt}
-\caption{Main retrieval results on T\textsuperscript{2}-RAGBench (23,088 queries, 7,318 documents). All pairwise differences between adjacent methods are statistically significant ($p < 0.001$). Best in \textbf{bold}.}
+\caption{Main retrieval results on T\textsuperscript{2}-RAGBench (23,088 queries, 7,318 documents). \textsuperscript{$\diamond$}Open-weight stack: \texttt{BAAI/bge-m3} (1024-d) and \texttt{BAAI/bge-reranker-v2-m3}, both run locally on a single GPU; latency omitted because the \texttt{text-embedding-3-large} and Cohere rows ran on Azure AI Foundry, and a cross-hardware comparison would be misleading. All within-stack pairwise differences are statistically significant at $p < 0.05$ after Bonferroni correction over the comparison family, with the exceptions noted in Section~\ref{sec:negative}. Best in \textbf{bold}.}
 \label{tab:main_results}
 \end{table*}
 
@@ -242,6 +250,9 @@ Long document              &  1 \\
 \paragraph{Why BM25 wins, and what that means for leaderboards.}
 \texttt{text-embedding-3-large} is in the top tier on MTEB and BEIR, but on T\textsuperscript{2}-RAGBench BM25 beats it on every metric except Recall@20, where the two are tied. The reason is not mysterious: financial queries are full of terms that appear verbatim in their answer documents---company names, tickers, standardized metric labels, fiscal-period identifiers---and lexical matching picks these up cleanly. A dense encoder smears the same tokens into a neighborhood of near-synonyms, many of which the query never asked for. The lesson is narrower than ``rethink evaluation'': MTEB and BEIR rankings simply do not transfer to text-and-table corpora, so do not pick a dense encoder by leaderboard position if that is where your data lives.
 
+\paragraph{The BM25 advantage is robust to encoder choice---and dense fusion is not.}
+Swapping \texttt{text-embedding-3-large} for the open-weight BGE-M3 (1024-d) does not flip the ranking. BGE-M3 dense reaches Recall@5 = 0.508, well below OpenAI dense at 0.587 and below BM25 at 0.644. More striking, \emph{adding BGE-M3 to BM25 via RRF gives no gain over BM25 alone} (R@5 = 0.633 vs.\ 0.644, $-1.1$~pp), whereas the same fusion with OpenAI dense yields $+5.1$~pp over BM25 (0.695 vs.\ 0.644). The closed two-stage pipeline (Hybrid + Cohere Rerank, R@5 = 0.816) is also not closely tracked by its open counterpart (Hybrid (BGE-M3) + BGE Rerank, R@5 = 0.611): even after normalising by candidate-pool ceiling, the open reranker recovers 75\% of its top-20 ceiling versus 93\% for Cohere. We do not claim this gap is intrinsic to open weights; \texttt{bge-reranker-v2-m3} is run at its officially recommended \texttt{max\_length}=512, while Cohere uses 4096 tokens. Operating each at its trained point is the most defensible comparison we can offer without retraining, but it does mean the rerankers see different amounts of context per (query, document) pair. The structural takeaway holds in either reading: lexical matching wins on text-and-table data because the answer-bearing tokens occur verbatim, and the marginal value of dense fusion depends on the encoder, not just on whether dense signals are present at all.
+
 \paragraph{The reranker does most of the heavy lifting.}
 Adding a cross-encoder reranker on top of hybrid RRF is worth +17.2pp MRR@3 and +12.1pp Recall@5. That is a larger improvement than anything else we measured, and it is the only configuration that closes most of the gap to the oracle ceiling. Candidate depth matters: the rerank step degrades below 50 candidates (Section~\ref{sec:ablations}).
 
@@ -263,7 +274,7 @@ On a financial QA benchmark of 23{,}088 text-and-table queries, hybrid RRF follo
 
 \paragraph{Whole-document retrieval.} We index each document whole ($\sim$920 tokens). Chunking changes the recall game; it may close part of the dense-encoder gap on longer documents by giving the encoder a smaller surface to summarize.
 
-\paragraph{One dense encoder.} All dense experiments use \texttt{text-embedding-3-large}. A different encoder may shift the dense number up or down; we do not expect it to close the gap to BM25 on this corpus, but we have not measured it.
+\paragraph{Two dense encoders, two rerankers.} We evaluated two dense encoders (\texttt{text-embedding-3-large}, BGE-M3) and two cross-encoder rerankers (Cohere Rerank v4.0 Pro, \texttt{bge-reranker-v2-m3}). The qualitative ordering---BM25 above either dense encoder, hybrid above both, hybrid+rerank above hybrid for the closed stack---held in every pairing we tested. Encoder families with explicit table-structure pretraining (e.g.\ table-aware contrastive variants) may behave differently. The two rerankers are run at different officially recommended \texttt{max\_length} settings (4{,}096 vs.\ 512); we do not claim universality across reranker context windows.
 
 \paragraph{Commercial APIs.} The dense encoder, reranker, and generation LLM are all commercial endpoints. Model weights and behaviors can change. We release per-query outputs so that our results can be compared against future re-runs rather than re-reproduced from scratch.
 
@@ -299,17 +310,29 @@ Table~\ref{tab:hyperparams} lists all hyperparameters. Table~\ref{tab:full_resul
   & $k_1$ / $b$      & 1.2 / 0.75 & Canonical Okapi defaults \\
   & Tokenizer        & whitespace split & Via \texttt{rank\_bm25} \\
 \midrule
-\multirow{2}{*}{Dense (text-embed-3-large)}
+\multirow{3}{*}{Dense (text-embed-3-large)}
   & Dimensions       & 3{,}072 & OpenAI via Azure AI Foundry \\
+  & Max input        & $\sim$8{,}191 tokens & API default \\
+  & Index type       & FAISS \texttt{IndexFlatIP} & Exact cosine search \\
+\midrule
+\multirow{3}{*}{Dense (BGE-M3)\textsuperscript{$\diamond$}}
+  & Dimensions       & 1{,}024 & \texttt{BAAI/bge-m3} via \texttt{sentence-transformers} \\
+  & \texttt{max\_seq\_length} & 8{,}192 & BGE-M3 native maximum \\
   & Index type       & FAISS \texttt{IndexFlatIP} & Exact cosine search \\
 \midrule
 Hybrid RRF & $k$ & 60 (ablation: 10, 30, 100) & Smoothing constant \\
 \midrule
 Hybrid CC & $\alpha$ & 0.5 (ablation: 0.3, 0.7, 0.9) & Dense weight \\
 \midrule
-\multirow{2}{*}{Cohere Rerank}
+\multirow{3}{*}{Cohere Rerank}
   & Model / top\_n   & v4.0-pro / 10 & Via Azure AI Foundry \\
+  & \texttt{max\_tokens\_per\_doc} & 4{,}096 & API default \\
   & Candidate pool   & 50    & From first stage \\
+\midrule
+\multirow{3}{*}{BGE Rerank\textsuperscript{$\diamond$}}
+  & Model / top\_n   & \texttt{bge-reranker-v2-m3} / 10 & Local cross-encoder \\
+  & \texttt{max\_length} & 512 & Official recommended default \\
+  & Candidate pool   & 60 & From first stage; minor asymmetry vs Cohere (50) \\
 \midrule
 HyDE & LLM / temp / max\_tok & gpt-4.1-mini / 0 / 150 & Single generation \\
 \midrule
@@ -337,9 +360,15 @@ Contextual & LLM / temp / max\_tok & gpt-4.1-mini / 0 / 100 & Per-document conte
 \toprule
 \textbf{Method} & \textbf{R@1} & \textbf{R@3} & \textbf{R@5} & \textbf{R@10} & \textbf{R@20} & \textbf{MRR@3} & \textbf{MRR@5} & \textbf{nDCG@5} & \textbf{nDCG@10} & \textbf{MAP} \\
 \midrule
+Dense (BGE-M3)\textsuperscript{$\diamond$}
+                  & 0.225 & 0.425 & 0.508 & 0.597 & 0.677 & 0.315 & 0.334 & 0.377 & 0.406 & 0.351 \\
 HyDE              & 0.221 & 0.441 & 0.544 & 0.671 & 0.767 & 0.318 & 0.341 & 0.392 & 0.433 & 0.365 \\
 Dense             & 0.248 & 0.481 & 0.587 & 0.703 & 0.798 & 0.351 & 0.375 & 0.428 & 0.466 & 0.398 \\
 Contextual Dense  & 0.266 & 0.508 & 0.615 & 0.732 & 0.817 & 0.373 & 0.398 & 0.452 & 0.490 & 0.420 \\
+Hybrid (BGE-M3) + BGE Rerank\textsuperscript{$\diamond$}
+                  & 0.301 & 0.537 & 0.611 & 0.693 & 0.764 & 0.409 & 0.426 & 0.472 & 0.499 & 0.442 \\
+Hybrid (BGE-M3)\textsuperscript{$\diamond$}
+                  & 0.286 & 0.538 & 0.633 & 0.733 & 0.814 & 0.399 & 0.421 & 0.474 & 0.507 & 0.440 \\
 Multi-Query       & 0.283 & 0.539 & 0.640 & 0.734 & 0.820 & 0.397 & 0.420 & 0.475 & 0.506 & 0.439 \\
 BM25              & 0.293 & 0.552 & 0.644 & 0.735 & 0.797 & 0.411 & 0.432 & 0.485 & 0.515 & 0.449 \\
 CRAG              & 0.302 & 0.556 & 0.658 & 0.788 & 0.788\textsuperscript{$\dagger$} & 0.415 & 0.439 & 0.493 & 0.536 & 0.456 \\
@@ -349,7 +378,7 @@ Hybrid + Rerank   & \textbf{0.472} & \textbf{0.758} & \textbf{0.816} & \textbf{0
 \bottomrule
 \end{tabular}
 \vspace{4pt}
-\caption{Full retrieval results (text-embedding-3-large). Sorted by nDCG@10. \textsuperscript{$\ast$}Rerank returns $\leq$10 docs. \textsuperscript{$\dagger$}CRAG returns $\leq$10 documents; R@20 reported equal to R@10 for completeness.}
+\caption{Full retrieval results, sorted by nDCG@10. Rows marked \textsuperscript{$\diamond$}~use the open-weight \texttt{BAAI/bge-m3}~+~\texttt{bge-reranker-v2-m3} stack; all other rows use \texttt{text-embedding-3-large}. \textsuperscript{$\ast$}Rerank returns $\leq$10 docs. \textsuperscript{$\dagger$}CRAG returns $\leq$10 documents; R@20 reported equal to R@10 for completeness.}
 \label{tab:full_results}
 \end{table*}
 
@@ -360,24 +389,30 @@ Hybrid + Rerank   & \textbf{0.472} & \textbf{0.758} & \textbf{0.816} & \textbf{0
 \toprule
 \textbf{Subset} & \textbf{Method} & \textbf{R@5} & \textbf{R@10} & \textbf{MRR@3} \\
 \midrule
-\multirow{3}{*}{FinQA}
+\multirow{5}{*}{FinQA}
   & BM25    & 0.729 & 0.834 & 0.389 \\
   & Dense   & 0.611 & 0.748 & 0.308 \\
   & Hybrid  & \textbf{0.737} & \textbf{0.856} & \textbf{0.389} \\
+  & Dense (BGE-M3)\textsuperscript{$\diamond$}    & 0.600 & 0.703 & 0.365 \\
+  & Hybrid (BGE-M3) + BGE Rerank\textsuperscript{$\diamond$} & 0.660 & 0.754 & 0.393 \\
 \midrule
-\multirow{3}{*}{ConvFinQA}
+\multirow{5}{*}{ConvFinQA}
   & BM25    & 0.696 & 0.781 & 0.500 \\
   & Dense   & 0.654 & 0.781 & 0.410 \\
   & Hybrid  & \textbf{0.754} & \textbf{0.850} & \textbf{0.519} \\
+  & Dense (BGE-M3)\textsuperscript{$\diamond$}    & 0.582 & 0.677 & 0.330 \\
+  & Hybrid (BGE-M3) + BGE Rerank\textsuperscript{$\diamond$} & 0.687 & 0.759 & 0.492 \\
 \midrule
-\multirow{3}{*}{TAT-DQA}
+\multirow{5}{*}{TAT-DQA}
   & BM25    & 0.566 & 0.649 & 0.400 \\
   & Dense   & 0.549 & 0.647 & 0.364 \\
   & Hybrid  & \textbf{0.647} & \textbf{0.746} & \textbf{0.438} \\
+  & Dense (BGE-M3)\textsuperscript{$\diamond$}    & 0.418 & 0.496 & 0.274 \\
+  & Hybrid (BGE-M3) + BGE Rerank\textsuperscript{$\diamond$} & 0.551 & 0.628 & 0.395 \\
 \bottomrule
 \end{tabular}
 \vspace{4pt}
-\caption{Per-subset results. TAT-DQA is hardest; hybrid RRF gains most on TAT-DQA (+8.1pp R@5 over BM25).}
+\caption{Per-subset results. TAT-DQA is hardest; hybrid RRF gains most on TAT-DQA (+8.1pp R@5 over BM25). Rows marked \textsuperscript{$\diamond$}~use the open-weight \texttt{BAAI/bge-m3}~+~\texttt{bge-reranker-v2-m3} stack.}
 \label{tab:subset_results}
 \end{table}
 

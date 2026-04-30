@@ -35,10 +35,17 @@ INDEX_CACHE_ROOT = PROJECT_ROOT / "data" / "indexes"
 
 def _get_or_build_dense(embedder, emb_key: str, chunk_strategy: str,
                          doc_ids: list[str], documents: list[str], name: str):
-    """Build a DenseRetriever, loading from cache if available."""
+    """Build a DenseRetriever, loading from cache if available.
+
+    The cache key includes the embedder's ``max_seq_length`` (when exposed)
+    so that bumping ``max_seq_length`` invalidates any stale index built at
+    a smaller value, rather than silently reusing it.
+    """
     from src.retrieval.dense_retriever import DenseRetriever
 
-    cache_dir = INDEX_CACHE_ROOT / f"{emb_key}_{chunk_strategy}"
+    max_seq = getattr(embedder, "max_seq_length", None)
+    suffix = f"_seq{max_seq}" if max_seq else ""
+    cache_dir = INDEX_CACHE_ROOT / f"{emb_key}_{chunk_strategy}{suffix}"
     retriever = DenseRetriever(embedder=embedder, name=name)
 
     if cache_dir.exists() and (cache_dir / "index.faiss").exists():
@@ -198,10 +205,12 @@ def main(
         from src.reranking.reranker import create_reranker
         reranker = create_reranker(cfg["rerankers"][reranker_key])
         rerank_top_k = cfg["rerankers"][reranker_key].get("top_n", top_k)
+        reranker_max_length = cfg["rerankers"][reranker_key].get("max_length")
     else:
         from src.reranking.reranker import NoReranker
         reranker = NoReranker()
         rerank_top_k = top_k
+        reranker_max_length = None
 
     # Prepare queries
     qa_items = data.qa_items[:max_queries] if max_queries else data.qa_items
@@ -256,11 +265,29 @@ def main(
         if emb_key in cfg.get("embedding_models", {})
         else None
     )
-    index_path = INDEX_CACHE_ROOT / f"{emb_key}_{chunk_strategy}"
+    # Mirror the cache-suffix logic in _get_or_build_dense so index_faiss_sha256
+    # resolves to the actual on-disk index (now scoped by max_seq_length).
+    _max_seq = None
+    if hasattr(retriever, "embedder") and hasattr(retriever.embedder, "max_seq_length"):
+        _max_seq = retriever.embedder.max_seq_length
+    elif hasattr(retriever, "dense_retriever") and hasattr(
+        retriever.dense_retriever, "embedder"
+    ):
+        _emb = retriever.dense_retriever.embedder
+        if hasattr(_emb, "max_seq_length"):
+            _max_seq = _emb.max_seq_length
+    _index_suffix = f"_seq{_max_seq}" if _max_seq else ""
+    index_path = INDEX_CACHE_ROOT / f"{emb_key}_{chunk_strategy}{_index_suffix}"
     provenance = collect_provenance(
         embedding_model=emb_model_name,
         index_path=index_path,
     )
+
+    # Capture the actual operating-point hyperparameters that govern fair
+    # comparison across encoders/rerankers. Recorded so any reviewer can verify
+    # the comparison from the result JSON alone, without inspecting code.
+    embedder_max_seq = _max_seq
+    candidate_pool_size = max(top_k * 3, 20)
 
     result = ExperimentResult(
         method=method_label,
@@ -272,6 +299,9 @@ def main(
             "chunking": chunk_strategy,
             "subset": subset or "all",
             "seed": cfg["seed"],
+            "embedder_max_seq_length": embedder_max_seq,
+            "reranker_max_length": reranker_max_length,
+            "candidate_pool_size": candidate_pool_size,
             "provenance": provenance,
         },
         retrieval_metrics=retrieval_metrics,
