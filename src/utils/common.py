@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import random
+import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -24,12 +26,28 @@ RESULTS_DIR = DATA_DIR / "results"
 
 
 def set_seed(seed: int = 42) -> None:
-    """Set random seeds for reproducibility."""
+    """Set random seeds + deterministic CUDA flags for reproducibility.
+
+    Sets PYTHONHASHSEED, NumPy, random, and torch seeds. On CUDA, also enables
+    deterministic algorithms (CUBLAS_WORKSPACE_CONFIG=:4096:8) and disables
+    cuDNN benchmark mode. Note: BGE cross-encoder predict() sorts on float
+    scores, so ties may still resolve non-deterministically across hardware.
+    """
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     try:
         import torch
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except (AttributeError, RuntimeError):
+            pass
     except ImportError:
         pass
 
@@ -88,6 +106,93 @@ class ExperimentResult:
     def load(cls, path: Path) -> ExperimentResult:
         with open(path) as f:
             return cls(**json.load(f))
+
+
+def _safe_version(module_name: str) -> str | None:
+    """Return importlib.metadata version for a package, or None if not installed."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            return version(module_name)
+        except PackageNotFoundError:
+            return None
+    except ImportError:
+        return None
+
+
+def _file_sha256(path: Path) -> str | None:
+    """Compute SHA-256 of a file. Returns None if the file does not exist."""
+    if not path.exists():
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def collect_provenance(
+    embedding_model: str | None = None,
+    index_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Collect reproducibility metadata for an experiment run.
+
+    Includes: git SHA, library versions (torch, transformers, sentence-transformers,
+    faiss), CUDA / GPU info, the HF revision of the embedding model (if resolvable),
+    and the SHA-256 of the FAISS index file (if it exists).
+
+    Safe to call from any host: every lookup is wrapped in try/except so a
+    missing dependency or unreachable HF Hub never aborts the experiment.
+    """
+    prov: dict[str, Any] = {}
+
+    # Git revision of the working tree.
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(PROJECT_ROOT),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        prov["git_sha"] = sha
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        prov["git_sha"] = None
+
+    # Library versions.
+    prov["torch_version"] = _safe_version("torch")
+    prov["transformers_version"] = _safe_version("transformers")
+    prov["sentence_transformers_version"] = _safe_version("sentence-transformers")
+    prov["faiss_version"] = _safe_version("faiss-cpu") or _safe_version("faiss-gpu")
+
+    # CUDA + GPU.
+    try:
+        import torch
+        prov["cuda_available"] = bool(torch.cuda.is_available())
+        prov["cuda_version"] = torch.version.cuda if torch.cuda.is_available() else None
+        prov["gpu_name"] = (
+            torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        )
+    except ImportError:
+        prov["cuda_available"] = False
+        prov["cuda_version"] = None
+        prov["gpu_name"] = None
+
+    # HF Hub revision of the embedding model (best-effort: skipped if no network).
+    if embedding_model:
+        try:
+            from huggingface_hub import HfApi
+            info = HfApi().model_info(embedding_model)
+            prov["embedding_model_revision"] = getattr(info, "sha", None)
+        except Exception:
+            prov["embedding_model_revision"] = None
+
+    # SHA-256 of the FAISS index file, if present.
+    if index_path is not None:
+        ip = Path(index_path)
+        if ip.is_dir():
+            ip = ip / "index.faiss"
+        prov["index_faiss_sha256"] = _file_sha256(ip)
+
+    return prov
 
 
 class Timer:

@@ -65,10 +65,26 @@ class LocalCrossEncoderReranker(BaseReranker):
 
     name = "cross_encoder"
 
-    def __init__(self, model_name: str = "BAAI/bge-reranker-v2-m3"):
+    def __init__(self, model_name: str = "BAAI/bge-reranker-v2-m3",
+                 max_length: int = 512, batch_size: int = 8):
         from sentence_transformers import CrossEncoder
-        self.model = CrossEncoder(model_name)
+        self.model = CrossEncoder(model_name, max_length=max_length)
         self.name = model_name.split("/")[-1]
+
+        # Auto-cap batch size for non-CUDA devices: MPS hits buffer-size errors
+        # on long financial docs (verified) above ~8. CUDA can take 128+.
+        try:
+            import torch
+            on_cuda = torch.cuda.is_available()
+        except ImportError:
+            on_cuda = False
+        if not on_cuda and batch_size > 8:
+            logger.info(
+                f"LocalCrossEncoderReranker: capping batch_size {batch_size}->8 "
+                f"on non-CUDA device (MPS/CPU). Set CUDA to use the configured value."
+            )
+            batch_size = 8
+        self.batch_size = batch_size
 
     def rerank(
         self, query: str, documents: list[RetrievedDoc], top_k: int = 5
@@ -76,8 +92,9 @@ class LocalCrossEncoderReranker(BaseReranker):
         if not documents:
             return []
 
-        pairs = [[query, d.text] for d in documents]
-        scores = self.model.predict(pairs)
+        # Truncate doc text to avoid MPS buffer blowup on very long financial docs
+        pairs = [[query, d.text[:4096]] for d in documents]
+        scores = self.model.predict(pairs, batch_size=self.batch_size, show_progress_bar=False)
 
         scored = list(zip(documents, scores))
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -112,8 +129,15 @@ def create_reranker(config: dict) -> BaseReranker:
     if provider == "none":
         return NoReranker()
     elif provider in ("cohere", "azure_cohere"):
-        return AzureCohereReranker(config.get("model", "Cohere-rerank-v4.0-pro"), config.get("top_n", 10))
+        return AzureCohereReranker(
+            config.get("model", "Cohere-rerank-v4.0-pro"),
+            config.get("top_n", 10),
+        )
     elif provider == "local":
-        return LocalCrossEncoderReranker(config.get("model", "BAAI/bge-reranker-v2-m3"))
+        return LocalCrossEncoderReranker(
+            model_name=config.get("model", "BAAI/bge-reranker-v2-m3"),
+            max_length=config.get("max_length", 512),
+            batch_size=config.get("batch_size", 8),
+        )
     else:
         raise ValueError(f"Unknown reranker provider: {provider}")

@@ -18,9 +18,11 @@ from src.evaluation.retrieval_metrics import (
     compute_retrieval_metrics,
 )
 from src.utils.common import (
+    PROJECT_ROOT,
     RESULTS_DIR,
     ExperimentResult,
     Timer,
+    collect_provenance,
     get_logger,
     load_config,
     set_seed,
@@ -28,15 +30,44 @@ from src.utils.common import (
 
 logger = get_logger(__name__)
 
+INDEX_CACHE_ROOT = PROJECT_ROOT / "data" / "indexes"
+
+
+def _get_or_build_dense(embedder, emb_key: str, chunk_strategy: str,
+                         doc_ids: list[str], documents: list[str], name: str):
+    """Build a DenseRetriever, loading from cache if available."""
+    from src.retrieval.dense_retriever import DenseRetriever
+
+    cache_dir = INDEX_CACHE_ROOT / f"{emb_key}_{chunk_strategy}"
+    retriever = DenseRetriever(embedder=embedder, name=name)
+
+    if cache_dir.exists() and (cache_dir / "index.faiss").exists():
+        logger.info(f"Loading cached dense index from {cache_dir}")
+        retriever.load_index(cache_dir)
+        # Sanity check: doc count matches
+        if len(retriever._doc_ids) != len(doc_ids):
+            logger.warning(
+                f"Cached index has {len(retriever._doc_ids)} docs but corpus has "
+                f"{len(doc_ids)}. Rebuilding."
+            )
+            retriever = DenseRetriever(embedder=embedder, name=name)
+            retriever.build_index(doc_ids, documents)
+            retriever.save_index(cache_dir)
+    else:
+        retriever.build_index(doc_ids, documents)
+        retriever.save_index(cache_dir)
+
+    return retriever
+
 
 def build_retriever(method: str, config: dict, doc_ids: list[str], documents: list[str]):
     """Factory: build and index a retriever by method name.
 
     Imports are lazy so each method only requires its own dependencies.
     """
-    emb_config = config["embedding_models"].get(
-        config.get("_embedding_key", "openai_large")
-    )
+    emb_key = config.get("_embedding_key", "openai_large")
+    emb_config = config["embedding_models"].get(emb_key)
+    chunk_strategy = config["chunking"]["strategy"]
 
     if method == "bm25":
         from src.retrieval.bm25_retriever import BM25Retriever
@@ -47,21 +78,23 @@ def build_retriever(method: str, config: dict, doc_ids: list[str], documents: li
 
     elif method == "dense":
         from src.retrieval.base import create_embedder
-        from src.retrieval.dense_retriever import DenseRetriever
         embedder = create_embedder(emb_config)
-        retriever = DenseRetriever(embedder=embedder, name=f"dense_{emb_config['model']}")
-        retriever.build_index(doc_ids, documents)
+        retriever = _get_or_build_dense(
+            embedder, emb_key, chunk_strategy, doc_ids, documents,
+            name=f"dense_{emb_config['model']}",
+        )
 
     elif method == "hybrid":
         from src.retrieval.base import create_embedder
         from src.retrieval.bm25_retriever import BM25Retriever
-        from src.retrieval.dense_retriever import DenseRetriever
         from src.retrieval.hybrid_retriever import HybridRetriever
         embedder = create_embedder(emb_config)
         bm25 = BM25Retriever(k1=config["bm25"]["k1"], b=config["bm25"]["b"])
         bm25.build_index(doc_ids, documents)
-        dense = DenseRetriever(embedder=embedder, name=f"dense_{emb_config['model']}")
-        dense.build_index(doc_ids, documents)
+        dense = _get_or_build_dense(
+            embedder, emb_key, chunk_strategy, doc_ids, documents,
+            name=f"dense_{emb_config['model']}",
+        )
         retriever = HybridRetriever(
             bm25_retriever=bm25,
             dense_retriever=dense,
@@ -216,6 +249,19 @@ def main(
     if reranker_key != "none":
         method_label += f"+{reranker_key}"
 
+    # Collect reproducibility metadata. Embedding-model HF revision and FAISS
+    # index SHA-256 are best-effort: skipped silently if unavailable.
+    emb_model_name = (
+        cfg["embedding_models"].get(emb_key, {}).get("model")
+        if emb_key in cfg.get("embedding_models", {})
+        else None
+    )
+    index_path = INDEX_CACHE_ROOT / f"{emb_key}_{chunk_strategy}"
+    provenance = collect_provenance(
+        embedding_model=emb_model_name,
+        index_path=index_path,
+    )
+
     result = ExperimentResult(
         method=method_label,
         config={
@@ -225,6 +271,8 @@ def main(
             "top_k": top_k,
             "chunking": chunk_strategy,
             "subset": subset or "all",
+            "seed": cfg["seed"],
+            "provenance": provenance,
         },
         retrieval_metrics=retrieval_metrics,
         per_query_results=per_query,

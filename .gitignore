@@ -15,3 +15,21 @@ build/
 wandb/
 data/results/*.json
 .ipynb_checkpoints/
+
+# OS / IDE noise
+.DS_Store
+
+# Runtime logs from scripts/run_h100_experiment.sh
+run.log
+provenance.log
+retry_run.log
+
+# LaTeX build intermediates (commit only main.tex / .bib / .sty / .pdf)
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+paper_neurips/main.log
+paper_neurips/main.out

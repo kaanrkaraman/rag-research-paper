@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """Generate publication-quality figures for paper.tex using Matplotlib.
 
-Outputs PDF + PNG to paper/figures/ (relative to repo root).
+Outputs PDF + PNG to paper_neurips/figures/ (the NeurIPS submission's figure
+directory). Loads result JSONs from BOTH `data/results/` (newer BGE-M3 runs
+written by run_experiment.py) and `results/` (original OpenAI runs); the
+former takes precedence when a filename collides.
+
+Figure 4 (retrieval-generation correlation) is intentionally fixed to its
+original four-point panel (Dense / BM25 / Hybrid RRF / Oracle, GPT-4.1-mini)
+because BGE-M3 has no end-to-end generation runs in this submission cycle.
+The caption in `paper_neurips/main.tex` reflects this scope.
+
 Usage: python scripts/generate_figures.py
 """
 
@@ -17,37 +26,52 @@ import numpy as np
 
 # ── Paths ─────────────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESULTS = os.path.join(ROOT, "results")
-OUTDIR = os.path.join(ROOT, "paper", "figures")
+# Search order: prefer newer per-run output dir, fall back to legacy `results/`.
+RESULTS_DIRS = [
+    os.path.join(ROOT, "data", "results"),
+    os.path.join(ROOT, "results"),
+]
+OUTDIR = os.path.join(ROOT, "paper_neurips", "figures")
 
 # ── Methods (ascending by overall Recall@5) ───────────────────────
 METHODS = [
     ("hyde_gpt41mini_whole_doc.json", "HyDE"),
+    ("dense_bge_m3_whole_doc.json", "Dense (BGE-M3)"),
     ("dense_openai_whole_doc.json", "Dense"),
     ("contextual_dense_whole_doc.json", "Ctx Dense"),
+    ("hybrid_bge_m3_whole_doc.json", "Hybrid (BGE-M3)"),
     ("multi_query_gpt41mini_whole_doc.json", "Multi-Query"),
     ("bm25_openai_large_whole_doc.json", "BM25"),
     ("crag_whole_doc.json", "CRAG"),
     ("hybrid_rrf_whole_doc.json", "Hybrid RRF"),
     ("contextual_hybrid_whole_doc.json", "Ctx Hybrid"),
+    ("hybrid+bge_bge_m3_whole_doc.json", "Hybrid+BGE Rerank"),
     ("hybrid_rrf+cohere_rerank_whole_doc.json", "Hybrid+Rerank"),
 ]
 
 # ── Visual encoding ──────────────────────────────────────────────
+# BGE-M3 family colors are lighter relatives of their OpenAI/Cohere siblings,
+# so figures still group "dense / hybrid / hybrid+rerank" visually.
 COLOR = {
     "HyDE": "#d62728", "Dense": "#ff7f0e", "Ctx Dense": "#bcbd22",
     "Multi-Query": "#9467bd", "BM25": "#1f77b4", "CRAG": "#17becf",
     "Hybrid RRF": "#2ca02c", "Ctx Hybrid": "#8c564b", "Hybrid+Rerank": "#e377c2",
+    "Dense (BGE-M3)": "#ffb87a",       # lighter orange (paired with Dense)
+    "Hybrid (BGE-M3)": "#7fc97f",       # lighter green (paired with Hybrid RRF)
+    "Hybrid+BGE Rerank": "#c45ca1",     # paired with Hybrid+Rerank
 }
 MARKER = {
     "HyDE": "v", "Dense": "s", "Ctx Dense": "D",
     "Multi-Query": "P", "BM25": "o", "CRAG": "^",
     "Hybrid RRF": "X", "Ctx Hybrid": "*", "Hybrid+Rerank": "h",
+    "Dense (BGE-M3)": "<", "Hybrid (BGE-M3)": ">", "Hybrid+BGE Rerank": "p",
 }
 DASH = {
     "HyDE": (0, (3, 2)), "Dense": (0, (3, 2)), "BM25": (0, (3, 2)),
     "Ctx Dense": (0, (5, 2, 1, 2)), "Multi-Query": (0, (5, 2, 1, 2)), "CRAG": (0, (5, 2, 1, 2)),
     "Hybrid RRF": "solid", "Ctx Hybrid": "solid", "Hybrid+Rerank": "solid",
+    "Dense (BGE-M3)": (0, (3, 2)), "Hybrid (BGE-M3)": "solid",
+    "Hybrid+BGE Rerank": "solid",
 }
 
 # ── Layout constants (ACL two-column format) ────────────────────
@@ -80,8 +104,15 @@ METRIC_BLUE = "#1f77b4"
 
 # ── Helpers ──────────────────────────────────────────────────────
 def load_json(fname):
-    with open(os.path.join(RESULTS, fname)) as f:
-        return json.load(f)
+    """Load a result JSON, searching `RESULTS_DIRS` in order."""
+    for d in RESULTS_DIRS:
+        path = os.path.join(d, fname)
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+    raise FileNotFoundError(
+        f"{fname} not found in any of: {RESULTS_DIRS}"
+    )
 
 
 def save(fig, name):
@@ -94,17 +125,30 @@ def save(fig, name):
 
 # ── Data loading ─────────────────────────────────────────────────
 def load_all_data():
+    """Load every method in METHODS; skip (with a warning) any that are missing.
+
+    Mutates the module-level METHODS list to drop missing entries so all
+    downstream figures iterate only over methods that actually have data.
+    """
+    global METHODS
     agg = {}
     sub_r5 = {}
+    kept: list[tuple[str, str]] = []
     for fname, name in METHODS:
         print(f"  Loading {name}...")
-        data = load_json(fname)
+        try:
+            data = load_json(fname)
+        except FileNotFoundError as e:
+            print(f"    SKIP {name}: {e}")
+            continue
         agg[name] = data["retrieval_metrics"]
         by_sub = defaultdict(list)
         for q in data["per_query_results"]:
             by_sub[q["subset"]].append(q["recall@5"])
         sub_r5[name] = {s: float(np.mean(v)) for s, v in by_sub.items()}
+        kept.append((fname, name))
         del data
+    METHODS = kept
     return agg, sub_r5
 
 
@@ -219,20 +263,13 @@ def fig4_correlation(agg):
     gen = {g["tag"]: g["nm"] for g in load_json("generation_all_fixed.json")}
 
     points = [
-        ("Dense",      "dense_gpt41mini",  "#ff7f0e"),
-        ("BM25",       "bm25_gpt41mini",   "#1f77b4"),
-        ("Hybrid RRF", "hybrid_gpt41mini", "#2ca02c"),
-        ("Oracle",     "oracle_gpt41mini",  "#7B3294"),
+        ("Dense",      "dense_gpt41mini",  "#ff7f0e", "s"),
+        ("BM25",       "bm25_gpt41mini",   "#1f77b4", "o"),
+        ("Hybrid RRF", "hybrid_gpt41mini", "#2ca02c", "X"),
+        ("Oracle",     "oracle_gpt41mini",  "#7B3294", "D"),
     ]
-    label_offset = {
-        "Dense":      (-6, -10),
-        "BM25":       (6, -10),
-        "Hybrid RRF": (0, 8),
-        "Oracle":     (-6, 8),
-    }
-
     xs, ys = [], []
-    for display, tag, _ in points:
+    for display, tag, _, _ in points:
         r5 = 1.0 if "oracle" in tag else agg[display]["recall@5"]
         xs.append(r5)
         ys.append(gen[tag])
@@ -245,16 +282,13 @@ def fig4_correlation(agg):
     fig, ax = plt.subplots(figsize=(COL_W, 2.6))
     ax.plot(xl, slope * xl + intercept, "--", color="gray", alpha=0.5, linewidth=1.2)
 
-    for i, (display, _, clr) in enumerate(points):
-        ax.scatter(xs[i], ys[i], s=80, color=clr, edgecolors="white",
-                   linewidth=0.8, zorder=5)
-        dx, dy = label_offset[display]
-        ax.annotate(
-            display, (xs[i], ys[i]),
-            xytext=(dx, dy), textcoords="offset points",
-            fontsize=8, fontweight="bold", color=clr,
-        )
+    for i, (display, _, clr, mkr) in enumerate(points):
+        ax.scatter(xs[i], ys[i], s=80, color=clr, marker=mkr,
+                   edgecolors="white", linewidth=0.8, zorder=5,
+                   label=display)
 
+    ax.legend(loc="lower right", framealpha=0.95, edgecolor="#cccccc",
+              fancybox=False, handletextpad=0.4)
     ax.text(0.03, 0.97, f"$r$ = {r:.3f}", transform=ax.transAxes,
             fontsize=9, va="top", ha="left", style="italic")
     ax.set_xlabel("Retrieval Recall@5")
@@ -278,11 +312,11 @@ def fig5_fusion_ablation():
     rrf_r5  = [0.716, 0.705, 0.695, 0.695]
     rrf_mrr = [0.435, 0.433, 0.433, 0.433]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(TEXT_W, 2.6), sharey=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(COL_W, 4.2), sharey=True)
 
     mkr = dict(markersize=6, markeredgecolor="white", markeredgewidth=0.6)
 
-    # Left: Convex Combination
+    # Top: Convex Combination
     ax1.plot(cc_alpha, cc_r5, "o-", color=METRIC_GREEN, linewidth=1.8, label="R@5", **mkr)
     ax1.plot(cc_alpha, cc_mrr, "s--", color=METRIC_BLUE, linewidth=1.8, label="MRR@3", **mkr)
     ax1.set_xlabel(r"$\alpha$ (dense weight)")
@@ -293,10 +327,11 @@ def fig5_fusion_ablation():
     ax1.spines["top"].set_visible(False)
     ax1.spines["right"].set_visible(False)
 
-    # Right: RRF
+    # Bottom: RRF
     ax2.plot(rrf_k, rrf_r5, "o-", color=METRIC_GREEN, linewidth=1.8, label="R@5", **mkr)
     ax2.plot(rrf_k, rrf_mrr, "s--", color=METRIC_BLUE, linewidth=1.8, label="MRR@3", **mkr)
     ax2.set_xlabel("k (RRF smoothing)")
+    ax2.set_ylabel("Score")
     ax2.set_title("RRF: Effect of k Parameter", fontsize=9)
     ax2.spines["top"].set_visible(False)
     ax2.spines["right"].set_visible(False)

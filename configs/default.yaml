@@ -19,6 +19,14 @@ embedding_models:
     model: "text-embedding-3-large"
     dimensions: 3072
     batch_size: 100
+  bge_m3:
+    provider: "local"
+    model: "BAAI/bge-m3"
+    dimensions: 1024
+  bge_large_en:
+    provider: "local"
+    model: "BAAI/bge-large-en-v1.5"
+    dimensions: 1024
 
 rerankers:
   cohere:
@@ -28,7 +36,9 @@ rerankers:
   bge:
     provider: "local"
     model: "BAAI/bge-reranker-v2-m3"
-    batch_size: 32
+    max_length: 512
+    # Tuned for H100 80 GB; reduce to 8 for MPS/CPU.
+    batch_size: 128
 
 llm:
   model: "gpt-4.1-mini"

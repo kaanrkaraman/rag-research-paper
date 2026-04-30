@@ -116,18 +116,32 @@ class CohereEmbedder(BaseEmbedder):
         return self._dimension
 
     def _embed(
-        self, texts: list[str], input_type: str, batch_size: int = 96
+        self, texts: list[str], input_type: str, batch_size: int = 32
     ) -> np.ndarray:
+        import time as _time
         all_embeddings = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            resp = self.client.embed(
-                texts=batch,
-                model=self.model,
-                input_type=input_type,
-                embedding_types=["float"],
-            )
-            all_embeddings.extend(resp.embeddings.float_)
+            for attempt in range(5):
+                try:
+                    resp = self.client.embed(
+                        texts=batch,
+                        model=self.model,
+                        input_type=input_type,
+                        embedding_types=["float"],
+                    )
+                    all_embeddings.extend(resp.embeddings.float_)
+                    break
+                except Exception as e:
+                    if "429" in str(e) or "rate" in str(e).lower():
+                        wait = 60 * (attempt + 1)
+                        logger.warning(f"Rate limited, waiting {wait}s (attempt {attempt+1}/5)")
+                        _time.sleep(wait)
+                    else:
+                        raise
+            # Pace requests to stay under 100k tokens/min
+            if i + batch_size < len(texts):
+                _time.sleep(3.0)
         return np.array(all_embeddings, dtype=np.float32)
 
     def embed_documents(self, texts: list[str]) -> np.ndarray:
@@ -168,14 +182,36 @@ class VoyageEmbedder(BaseEmbedder):
 
 
 class LocalEmbedder(BaseEmbedder):
-    """Local sentence-transformers embedder (BGE-M3, E5, etc.)."""
+    """Local sentence-transformers embedder (BGE-M3, E5, etc.).
+
+    Batch sizes auto-scale by device:
+      - CUDA (e.g. H100/H200/A100): docs=64, queries=128
+      - MPS / CPU: docs=8, queries=32 (preserves prior MPS-tuned defaults)
+    """
 
     def __init__(self, model_name: str = "BAAI/bge-m3", max_seq_length: int = 1024):
         from sentence_transformers import SentenceTransformer
         self.model = SentenceTransformer(model_name)
-        self.model.max_seq_length = max_seq_length
+        # Don't exceed the model's native maximum (e.g. BGE-large-en caps at 512)
+        native_max = getattr(self.model, "max_seq_length", max_seq_length)
+        self.model.max_seq_length = min(max_seq_length, native_max)
         self._dimension = self.model.get_sentence_embedding_dimension()
-        logger.info(f"LocalEmbedder: {model_name}, dim={self._dimension}, max_seq={max_seq_length}")
+
+        # Auto-scale batch sizes for the active device. CUDA gets the H100-tuned
+        # values; MPS/CPU keep the prior conservative defaults.
+        try:
+            import torch
+            self._on_cuda = torch.cuda.is_available()
+        except ImportError:
+            self._on_cuda = False
+        self._docs_batch = 64 if self._on_cuda else 8
+        self._queries_batch = 128 if self._on_cuda else 32
+
+        logger.info(
+            f"LocalEmbedder: {model_name}, dim={self._dimension}, "
+            f"max_seq={self.model.max_seq_length}, "
+            f"docs_batch={self._docs_batch}, queries_batch={self._queries_batch}"
+        )
 
     @property
     def dimension(self) -> int:
@@ -183,12 +219,18 @@ class LocalEmbedder(BaseEmbedder):
 
     def embed_documents(self, texts: list[str]) -> np.ndarray:
         return self.model.encode(
-            texts, show_progress_bar=True, normalize_embeddings=True, batch_size=8
+            texts,
+            show_progress_bar=True,
+            normalize_embeddings=True,
+            batch_size=self._docs_batch,
         )
 
     def embed_queries(self, queries: list[str]) -> np.ndarray:
         return self.model.encode(
-            queries, show_progress_bar=True, normalize_embeddings=True, batch_size=32
+            queries,
+            show_progress_bar=len(queries) > 16,
+            normalize_embeddings=True,
+            batch_size=self._queries_batch,
         )
 
 
