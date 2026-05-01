@@ -45,6 +45,24 @@ rerankers:
     max_length: 512
     # Tuned for H100 80 GB; reduce to 8 for MPS/CPU.
     batch_size: 128
+  # In-regime sanity: BAAI's own engineer (Shitao, HF discussion) reports the
+  # model was fine-tuned at 1024, not 512. Running at 1024 keeps us inside the
+  # trained regime while still covering the corpus mean (~920 tokens) without
+  # the truncation that 512 imposes.
+  bge_1024:
+    provider: "local"
+    model: "BAAI/bge-reranker-v2-m3"
+    max_length: 1024
+    batch_size: 64
+  # Out-of-regime sanity: extends past BAAI's stated fine-tune length to cover
+  # the full mean+1sd doc length (~1,460 tokens) and dissolve the truncation
+  # confound entirely. Together with bge_1024, brackets the question of whether
+  # the BGE rerank degradation on hybrid is a context-window artifact.
+  bge_2048:
+    provider: "local"
+    model: "BAAI/bge-reranker-v2-m3"
+    max_length: 2048
+    batch_size: 32
 
 llm:
   model: "gpt-4.1-mini"

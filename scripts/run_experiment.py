@@ -158,6 +158,11 @@ def build_retriever(method: str, config: dict, doc_ids: list[str], documents: li
 @click.option("--config", "config_path", default=None, help="Config YAML path")
 @click.option("--embedding", "emb_key", default="openai_large", help="Embedding model key")
 @click.option("--reranker", "reranker_key", default="none", help="Reranker key (none/cohere/local)")
+@click.option("--reranker-max-length", default=None, type=int,
+              help="Override the reranker's max_length without editing YAML. "
+                   "Use this to vary cross-encoder context window across runs.")
+@click.option("--reranker-batch-size", default=None, type=int,
+              help="Override the reranker's batch_size without editing YAML.")
 @click.option("--top-k", default=5, type=int, help="Number of documents to retrieve")
 @click.option("--subset", default=None, help="Specific subset (FinQA/ConvFinQA/TAT-DQA)")
 @click.option("--max-queries", default=None, type=int, help="Limit queries (for testing)")
@@ -167,6 +172,8 @@ def main(
     config_path: str | None,
     emb_key: str,
     reranker_key: str,
+    reranker_max_length: int | None,
+    reranker_batch_size: int | None,
     top_k: int,
     subset: str | None,
     max_queries: int | None,
@@ -175,6 +182,19 @@ def main(
     cfg = load_config(config_path)
     set_seed(cfg["seed"])
     cfg["_embedding_key"] = emb_key
+
+    # Validate reranker key NOW, before any expensive data load or index build.
+    # A typo'd or missing key used to silently fall through to NoReranker; we
+    # caught that the hard way (1228 s no-op run on the H100). Fail loud, fail
+    # early.
+    if reranker_key != "none" and reranker_key not in cfg["rerankers"]:
+        available = ", ".join(sorted(cfg["rerankers"].keys())) or "(none defined)"
+        raise click.UsageError(
+            f"--reranker={reranker_key!r} is not defined in configs/default.yaml "
+            f"under 'rerankers'. Available keys: {available}. "
+            "Pass --reranker bge with --reranker-max-length / --reranker-batch-size "
+            "to vary the operating point without editing YAML."
+        )
 
     # Load data
     logger.info("Loading T²-RAGBench...")
@@ -200,17 +220,36 @@ def main(
         retriever = build_retriever(method, cfg, chunk_ids, chunk_texts)
     logger.info(f"Index built in {index_timer.elapsed:.1f}s")
 
-    # Setup reranker (lazy import)
-    if reranker_key != "none" and reranker_key in cfg["rerankers"]:
-        from src.reranking.reranker import create_reranker
-        reranker = create_reranker(cfg["rerankers"][reranker_key])
-        rerank_top_k = cfg["rerankers"][reranker_key].get("top_n", top_k)
-        reranker_max_length = cfg["rerankers"][reranker_key].get("max_length")
-    else:
+    # Setup reranker (lazy import).
+    #
+    # Precedence rule: a non-"none" --reranker is a hard requirement. If the
+    # YAML doesn't define that key we FAIL LOUDLY rather than silently falling
+    # back to NoReranker — that exact silent fallthrough caused a 1228 s
+    # "no-op" run on the H100 where bge_1024 wasn't in the pulled YAML and the
+    # rerank pass never executed (metrics matched unreranked hybrid byte-for-byte).
+    if reranker_key == "none":
         from src.reranking.reranker import NoReranker
         reranker = NoReranker()
         rerank_top_k = top_k
-        reranker_max_length = None
+        effective_reranker_max_length: int | None = None
+    else:
+        if reranker_key not in cfg["rerankers"]:
+            available = ", ".join(sorted(cfg["rerankers"].keys())) or "(none defined)"
+            raise click.UsageError(
+                f"--reranker={reranker_key!r} is not defined in configs/default.yaml "
+                f"under 'rerankers'. Available keys: {available}. "
+                "Pass --reranker bge with --reranker-max-length / --reranker-batch-size "
+                "to vary the operating point without editing YAML."
+            )
+        from src.reranking.reranker import create_reranker
+        rcfg = dict(cfg["rerankers"][reranker_key])  # copy: don't mutate config
+        if reranker_max_length is not None:
+            rcfg["max_length"] = reranker_max_length
+        if reranker_batch_size is not None:
+            rcfg["batch_size"] = reranker_batch_size
+        reranker = create_reranker(rcfg)
+        rerank_top_k = rcfg.get("top_n", top_k)
+        effective_reranker_max_length = rcfg.get("max_length")
 
     # Prepare queries
     qa_items = data.qa_items[:max_queries] if max_queries else data.qa_items
@@ -289,6 +328,18 @@ def main(
     embedder_max_seq = _max_seq
     candidate_pool_size = max(top_k * 3, 20)
 
+    # Sum every file in the index dir, not just index.faiss; ColBERT-style
+    # indices have multiple shard files, FAISS-flat has just one. Either way
+    # the total bytes-on-disk is what reviewers care about.
+    index_size_mb = 0.0
+    if index_path.exists():
+        try:
+            index_size_mb = sum(
+                p.stat().st_size for p in index_path.rglob("*") if p.is_file()
+            ) / (1024 * 1024)
+        except OSError:
+            pass
+
     result = ExperimentResult(
         method=method_label,
         config={
@@ -300,7 +351,7 @@ def main(
             "subset": subset or "all",
             "seed": cfg["seed"],
             "embedder_max_seq_length": embedder_max_seq,
-            "reranker_max_length": reranker_max_length,
+            "reranker_max_length": effective_reranker_max_length,
             "candidate_pool_size": candidate_pool_size,
             "provenance": provenance,
         },
@@ -308,6 +359,7 @@ def main(
         per_query_results=per_query,
         wall_clock_seconds=sum(latencies) / 1000,
         index_time_seconds=index_timer.elapsed,
+        index_size_mb=index_size_mb,
         num_queries=len(queries),
         avg_latency_ms=float(sum(latencies) / len(latencies)) if latencies else 0,
     )

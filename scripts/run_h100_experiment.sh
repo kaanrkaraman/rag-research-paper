@@ -7,9 +7,12 @@
 # up where it left off.
 #
 # Runs three configurations on the full T²-RAGBench test set:
-#     dense  + bge_m3 + no rerank        (~3 min on H100)
-#     hybrid + bge_m3 + no rerank        (~3 min; reuses dense index)
-#     hybrid + bge_m3 + bge rerank       (~30-60 min)  ← the headline run
+#     dense  + bge_m3 + no rerank             (~3 min on H100)
+#     hybrid + bge_m3 + no rerank             (~3 min; reuses dense index)
+#     hybrid + bge_m3 + bge rerank   @ 512    (~30-60 min)  ← headline
+#     hybrid + bge_m3 + bge rerank   @ 1024   (~1-2 hr)     ← in-regime sanity
+#     hybrid + bge_m3 + bge rerank   @ 2048   (~2-4 hr)     ← out-of-regime sanity
+#     ColBERTv2 (late-interaction)            (~3-6 hr)     ← table-structure fix
 #
 # Usage:
 #     bash scripts/run_h100_experiment.sh                 # default: smart-skip
@@ -130,6 +133,33 @@ else
 fi
 
 # ------------------------------------------------------------------
+# Phase B': ColBERTv2 install (separate, --no-deps so it does not
+# downgrade torch/transformers/sentence-transformers we already pinned).
+# Skipped if the colbertv2 result JSON is already present (smart-skip
+# parity with Phase F). ragatouille pulls in colbert-ai, faiss, ninja —
+# we install with --no-deps and then explicitly grab the runtime
+# requirements that aren't already in the environment.
+# ------------------------------------------------------------------
+if [ "$SKIP_INSTALL" -eq 0 ] && ! python3 -c "import ragatouille" 2>/dev/null; then
+    if [ -f "$REPO_ROOT/data/results/colbertv2_whole_doc.json" ]; then
+        log "Phase B' — ColBERTv2 result already present; skipping ragatouille install"
+    else
+        phase "Phase B' — install ragatouille (--no-deps to protect existing torch)"
+        # ragatouille >=0.0.9 is the cleanest API, but its setup.py pins torch
+        # ranges that conflict with cu128. --no-deps + manual fill keeps our env.
+        pip install -q --no-deps "ragatouille>=0.0.9,<0.1"
+        pip install -q --no-deps "colbert-ai>=0.2.21"
+        # Runtime extras ragatouille/colbert actually need that aren't in our pin
+        pip install -q "bitarray>=2.9" "git-python>=1.0" "ujson>=5.0" \
+                       "ninja>=1.11" "voyager>=2.0" "fast-pytorch-kmeans>=0.2"
+        # Smoke-import to fail loud if there's still a missing piece
+        python3 -c "from ragatouille import RAGPretrainedModel" \
+            || { log "ragatouille import failed; ColBERTv2 phase will fail noisily"; }
+        log "ragatouille installed (no torch downgrade)"
+    fi
+fi
+
+# ------------------------------------------------------------------
 # Phase C: dataset (idempotent — HF cache makes re-runs free)
 # ------------------------------------------------------------------
 phase "Phase C — download T²-RAGBench (cached after first call)"
@@ -224,6 +254,41 @@ run_or_skip "BGE-M3 hybrid + BGE rerank (HEADLINE)" \
             "hybrid+bge_bge_m3_whole_doc.json" \
             --method hybrid --embedding bge_m3 --reranker bge --top-k 20
 
+# NOTE: 1024/2048 runs use plain `--reranker bge` and override max_length /
+# batch_size at the CLI rather than via separate YAML keys. This decouples
+# operating-point variation from a YAML edit, so the orchestrator works even
+# against an older HEAD that doesn't define `bge_1024` / `bge_2048` rerankers.
+# (The earlier YAML-keyed approach silently fell back to NoReranker on
+# environments where the keys weren't present, producing a 1228 s no-op run.)
+run_or_skip "BGE-M3 hybrid + BGE rerank @ max_length=1024 (in-regime sanity)" \
+            "hybrid+bge_1024_bge_m3_whole_doc.json" \
+            --method hybrid --embedding bge_m3 \
+            --reranker bge --reranker-max-length 1024 --reranker-batch-size 64 \
+            --output-name hybrid+bge_1024_bge_m3_whole_doc \
+            --top-k 20
+
+run_or_skip "BGE-M3 hybrid + BGE rerank @ max_length=2048 (out-of-regime sanity)" \
+            "hybrid+bge_2048_bge_m3_whole_doc.json" \
+            --method hybrid --embedding bge_m3 \
+            --reranker bge --reranker-max-length 2048 --reranker-batch-size 32 \
+            --output-name hybrid+bge_2048_bge_m3_whole_doc \
+            --top-k 20
+
+# ------------------------------------------------------------------
+# Phase F': ColBERTv2 late-interaction retrieval. Token-level retriever,
+# the natural fix named in §6 of the paper for the table-structure failure
+# mode. Uses ragatouille (PLAID-quantized index, MaxSim search) on the
+# same H100. Smart-skip via run_or_skip.
+# ------------------------------------------------------------------
+phase "Phase F' — ColBERTv2 (late-interaction)"
+
+if needs_run "colbertv2_whole_doc.json"; then
+    log "RUN  : ColBERTv2   ->   data/results/colbertv2_whole_doc.json"
+    python3 scripts/run_colbertv2.py --top-k 20
+else
+    log "SKIP : ColBERTv2  (already at data/results/colbertv2_whole_doc.json, 23088 records)"
+fi
+
 # ------------------------------------------------------------------
 # Phase G: provenance + final summary.
 # ------------------------------------------------------------------
@@ -238,7 +303,10 @@ import glob, json, os
 print("=== BGE-M3 results summary ===")
 files = sorted(set(
     glob.glob("data/results/*bge_m3*whole_doc.json") +
-    glob.glob("data/results/hybrid+bge_bge_m3_whole_doc.json")
+    glob.glob("data/results/hybrid+bge_bge_m3_whole_doc.json") +
+    glob.glob("data/results/hybrid+bge_1024_bge_m3_whole_doc.json") +
+    glob.glob("data/results/hybrid+bge_2048_bge_m3_whole_doc.json") +
+    glob.glob("data/results/colbertv2_whole_doc.json")
 ))
 for f in files:
     d = json.load(open(f))
