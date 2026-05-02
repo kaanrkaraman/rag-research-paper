@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Comprehensive RAG retrieval methods benchmark on T²-RAGBench"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [{name = "Süleyman Akarsu"}]
+authors = [{name = "Anonymous"}]
 
 dependencies = [
     # Data
