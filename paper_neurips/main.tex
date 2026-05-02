@@ -10,7 +10,7 @@
 \usepackage{hyperref}
 \usepackage{xcolor}
 
-\title{From BM25 to Corrective RAG: Evaluating Retrieval Strategies for Heterogeneous Text-and-Table Documents}
+\title{Beyond MTEB: Evaluating RAG Retrieval on Documents That Mix Prose and Tables}
 
 \author{
   Meftun Akarsu \\
@@ -30,10 +30,12 @@
 \maketitle
 
 \begin{abstract}
-A RAG pipeline is only as good as the documents it retrieves, yet retrieval on corpora that mix prose and tables has received little empirical study. MTEB and BEIR evaluate on homogeneous text, where dense retrieval generally wins; whether that ordering survives on documents whose answers live in table cells is unclear. We evaluate nine retrieval configurations on T\textsuperscript{2}-RAGBench, a financial QA benchmark of 23,088 queries over 7,318 SEC-filing documents, together with a BGE-M3 robustness panel covering encoder choice and a ColBERTv2 follow-up driven by our error analysis. Reported metrics include Recall@$k$, MRR, nDCG, end-to-end Number Match, and paired bootstrap significance tests.
+Retrieval-augmented generation is bounded by retrieval, but standard retrieval benchmarks (MTEB, BEIR) evaluate on homogeneous text where dense encoders typically win. Whether that ordering survives on documents combining prose and tables is an open empirical question. We evaluate nine retrieval configurations on T\textsuperscript{2}-RAGBench (23{,}088 financial QA queries over 7{,}318 SEC-filing documents averaging ${\sim}920$ tokens), together with a BGE-M3 robustness panel that varies the encoder and a ColBERTv2 follow-up driven by our error analysis.
 
-Four results stand out. BM25 beats \texttt{text-embedding-3-large} on nearly every metric, inverting the MTEB/BEIR ordering. Hybrid RRF followed by a cross-encoder reranker reaches Recall@5 = 0.816 and MRR@3 = 0.605, well ahead of any single-stage method. HyDE and multi-query expansion hurt rather than help: hallucinated numbers pull the query embedding away from documents with the exact figure. Of the 31\% of queries whose gold document is missed at rank 5, 73\% fail because the answer sits in a table cell that the encoder cannot recover from linearized text. We release the evaluation code, prompts, FAISS indices, and per-query outputs.
+Four findings. (1)~BM25 beats \texttt{text-embedding-3-large} on every metric except Recall@20: MTEB and BEIR rankings do not transfer to text-and-table corpora. (2)~Hybrid RRF + cross-encoder reranking reaches R@5 = 0.816 with closed APIs (Cohere) and R@5 = 0.751 with a fully open BGE-M3 stack; once both rerankers run inside their fine-tune context windows, the closed/open gap is 6.5~pp. (3)~Of the 30.5\% of queries hybrid RRF misses at rank 5, 73\% [Wilson 95\% CI: 64--81\%, $n=100$] fail because the answer sits in a table cell that linearized-text encoders cannot recover; ColBERTv2 lifts dense retrieval substantially but does not absorb this failure mode. (4)~HyDE and multi-query expansion hurt on numerical queries (hallucinated figures pull the query embedding off-target), while a cross-encoder reranker on a candidate pool of $\geq 50$ is the single largest improvement we measured (+12.1~pp R@5). All comparisons use paired bootstrap tests with Bonferroni correction. We release evaluation code, prompts, FAISS indices, and per-query outputs.
 \end{abstract}
+
+\noindent\textbf{Keywords:} retrieval-augmented generation; retrieval evaluation; hybrid retrieval; cross-encoder reranking; late-interaction retrieval; table understanding; financial QA; error taxonomy.
 
 % ============================================================
 \section{Introduction}
@@ -60,7 +62,7 @@ We use T\textsuperscript{2}-RAGBench \citep{strich2026t2ragbench}, a financial Q
 \label{sec:related}
 
 \paragraph{RAG retrieval methods.}
-BM25 remains competitive in zero-shot settings \citep{thakur2021beir}. Dense dual-encoders \citep{karpukhin2020dpr} and their successors (E5 \citep{wang2022e5}, E5-Mistral \citep{wang2024e5mistral}, BGE-M3 \citep{chen2024bgem3}) advance MTEB rankings through contrastive pretraining. Hybrid retrieval fuses sparse and dense signals via RRF \citep{cormack2009rrf}, consistently improving recall by 15--30\% \citep{li2025ragbestpractices}. Two-stage reranking with cross-encoders further refines results \citep{gao2024ragsurvey}. Query-side methods include HyDE \citep{gao2022hyde} and RAG-Fusion \citep{raudaschl2023ragfusion}. Index-side methods include Contextual Retrieval \citep{anthropic2024contextual} and HyPE \citep{vake2025hype}. Adaptive approaches like CRAG \citep{yan2024crag} trigger corrective searches when confidence is low.
+BM25 remains competitive in zero-shot settings \citep{thakur2021beir}. Dense dual-encoders \citep{karpukhin2020dpr} and their successors (E5 \citep{wang2022e5}, E5-Mistral \citep{wang2024e5mistral}, BGE-M3 \citep{chen2024bgem3}) advance MTEB rankings through contrastive pretraining. Late-interaction retrievers (ColBERT \citep{khattab2020colbert}, ColBERTv2 \citep{santhanam2022colbertv2}) keep a per-token vector for each document position rather than pooling, trading index size for finer-grained matching. Hybrid retrieval fuses sparse and dense signals via RRF \citep{cormack2009rrf}, consistently improving recall by 15--30\% \citep{li2025ragbestpractices}. Two-stage reranking with cross-encoders further refines results \citep{gao2024ragsurvey}. Query-side methods include HyDE \citep{gao2022hyde} and RAG-Fusion \citep{raudaschl2023ragfusion}. Index-side methods include Contextual Retrieval \citep{anthropic2024contextual} and HyPE \citep{vake2025hype}. Adaptive approaches like CRAG \citep{yan2024crag} trigger corrective searches when confidence is low.
 
 \paragraph{QA over documents that mix prose and tables.}
 HybridQA \citep{chen2020hybridqa} introduced multi-hop reasoning over linked tables and passages. In the financial domain, FinQA \citep{chen2021finqa}, TAT-QA \citep{zhu2021tatqa}, and ConvFinQA \citep{chen2022convfinqa} target numerical reasoning over hybrid contexts. A recent survey \citep{nan2025tableqasurvey} finds that retrieval of heterogeneous context remains the primary bottleneck.
@@ -169,7 +171,7 @@ Hybrid RRF with a cross-encoder reranker is the clear winner: Recall@5 of 0.816,
 
 \paragraph{Multi-query provides negligible benefit.} Multi-query achieves Recall@5 of 0.640, statistically indistinguishable from BM25's 0.644 ($p = 0.31$). Financial queries are already specific; reformulations do not surface new documents because the retrieval gap is structural (table format), not lexical.
 
-\paragraph{CRAG cannot match hybrid fusion.} While 63\% of queries triggered CRAG's correction pathway, rewritten queries face the same table structure challenge. Query rewriting alone cannot substitute for combining complementary retrieval signals.
+\paragraph{CRAG cannot match hybrid fusion.} CRAG triggers a query-rewrite branch whenever its relevance evaluator marks the top retrieval as ambiguous or irrelevant; the rewritten queries face the same table-structure challenge as the originals. Query rewriting alone cannot substitute for combining complementary retrieval signals.
 
 \subsection{End-to-End Generation}
 \label{sec:generation}
@@ -219,7 +221,7 @@ Oracle     & 0.350 \\
 \section{Error Taxonomy for Text-and-Table Retrieval}
 \label{sec:errors}
 
-The 31.1\% of queries where hybrid RRF misses the gold document in its top-5 is not a uniform error surface. We sampled 100 of those 7{,}188 failures and had GPT-5.4 label each by failure type; the resulting distribution (Table~\ref{tab:errors}) is dominated by a single category.
+The 30.5\% of queries where hybrid RRF misses the gold document in its top-5 is not a uniform error surface. We sampled 100 of those 7{,}033 failures and had GPT-5.4 label each by failure type;\footnote{The 100-failure sample was originally drawn from a slightly earlier hybrid RRF run with R@5 = 0.689 (7{,}188 failures); the current run shifted R@5 to 0.695 and the failure set differs by ${\sim}160$ queries out of ${\sim}7{,}000$. Re-drawing on the current set is unlikely to materially change the categorical distribution; the 73\% headline holds across the entire Wilson 95\% CI [64\%, 81\%].} the resulting distribution (Table~\ref{tab:errors}) is dominated by a single category.
 
 \begin{table}[t]
 \centering
@@ -244,7 +246,7 @@ Long document              &  1 \\
 
 \paragraph{Numerical reasoning (20\%)} failures occur when questions require computation (e.g., year-over-year change) rather than direct lookup.
 
-\paragraph{Cross-subset patterns.} TAT-DQA has the highest failure rate (35.6\% vs.\ 27.2\% FinQA, 26.0\% ConvFinQA). Among failures, 71.0\% of gold documents appear in \emph{neither} the dense nor BM25 top-5, indicating genuinely hard cases rather than fusion artifacts.
+\paragraph{Cross-subset patterns.} TAT-DQA has the highest failure rate (35.3\% vs.\ 26.3\% FinQA, 24.6\% ConvFinQA). Among failures, 71.0\% of gold documents appear in \emph{neither} the dense nor BM25 top-5, indicating genuinely hard cases rather than fusion artifacts.
 
 \paragraph{Implications for evaluation.} A method that pushes aggregate Recall@5 up might only be chipping at the vocabulary mismatch tail (5\% of errors) while leaving the table structure mass (73\%) untouched. Future evaluations on heterogeneous corpora should split metrics by failure category; the aggregate alone is misleading.
 
@@ -384,7 +386,8 @@ Hybrid RRF        & 0.308 & 0.588 & 0.695 & 0.801 & 0.877 & 0.433 & 0.551 & 0.47
 Contextual Hybrid & 0.327 & 0.610 & 0.717 & 0.818 & 0.887 & 0.454 & 0.571 & 0.497 \\
 Hybrid (BGE-M3) + BGE Rerank\textsuperscript{$\diamond$}
                   & 0.383 & 0.674 & 0.751 & 0.822 & 0.867 & 0.516 & 0.612 & 0.547 \\
-Hybrid + Rerank   & \textbf{0.472} & \textbf{0.758} & \textbf{0.816} & \textbf{0.861} & \textsuperscript{$\ast$} & \textbf{0.605} & \textbf{0.683} & \textbf{0.625} \\
+Hybrid + Cohere Rerank
+                  & \textbf{0.472} & \textbf{0.758} & \textbf{0.816} & \textbf{0.861} & \textsuperscript{$\ast$} & \textbf{0.605} & \textbf{0.683} & \textbf{0.625} \\
 \bottomrule
 \end{tabular}
 \vspace{4pt}
@@ -442,7 +445,7 @@ Hybrid + Rerank   & \textbf{0.472} & \textbf{0.758} & \textbf{0.816} & \textbf{0
 \begin{figure*}[!t]
 \centering
 \includegraphics[width=\textwidth]{figures/main_comparison.pdf}
-\caption{Grouped comparison across five metrics. BM25 outperforms dense retrieval; hybrid RRF dominates.}
+\caption{Grouped comparison across five metrics. BM25 outperforms standalone dense retrievers; hybrid + cross-encoder reranking is the top configuration on every metric.}
 \label{fig:bar_comparison}
 \end{figure*}
 
