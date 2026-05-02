@@ -147,11 +147,17 @@ if [ "$SKIP_INSTALL" -eq 0 ] && ! python3 -c "import ragatouille" 2>/dev/null; t
         phase "Phase B' — install ragatouille (--no-deps to protect existing torch)"
         # ragatouille >=0.0.9 is the cleanest API, but its setup.py pins torch
         # ranges that conflict with cu128. --no-deps + manual fill keeps our env.
-        pip install -q --no-deps "ragatouille>=0.0.9,<0.1"
+        # Pin <0.0.10 to keep the Stanford ColBERT backend; 0.0.10+ migrates to PyLate.
+        pip install -q --no-deps "ragatouille>=0.0.9,<0.0.10"
         pip install -q --no-deps "colbert-ai>=0.2.21"
-        # Runtime extras ragatouille/colbert actually need that aren't in our pin
+        # Runtime extras ragatouille/colbert actually need that aren't in our pin.
+        # langchain provides ragatouille's retrievers integration; without it,
+        # `from ragatouille import RAGPretrainedModel` fails at import on
+        # `langchain.retrievers`. langchain-community is a peer dep since 0.1.
         pip install -q "bitarray>=2.9" "git-python>=1.0" "ujson>=5.0" \
-                       "ninja>=1.11" "voyager>=2.0" "fast-pytorch-kmeans>=0.2"
+                       "ninja>=1.11" "voyager>=2.0" "fast-pytorch-kmeans>=0.2" \
+                       "langchain>=0.1,<0.4" "langchain-community>=0.0.20" \
+                       "llama-index-core>=0.10" "accelerate>=0.30"
         # Smoke-import to fail loud if there's still a missing piece
         python3 -c "from ragatouille import RAGPretrainedModel" \
             || { log "ragatouille import failed; ColBERTv2 phase will fail noisily"; }
