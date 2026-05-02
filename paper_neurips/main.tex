@@ -35,7 +35,7 @@ Retrieval-augmented generation is bounded by retrieval, but standard retrieval b
 Main findings. (1)~BM25 beats \texttt{text-embedding-3-large} on every metric except Recall@20: MTEB and BEIR rankings do not transfer to text-and-table corpora. (2)~Hybrid RRF + cross-encoder reranking reaches R@5 = 0.816 with closed APIs (Cohere) and R@5 = 0.751 with a fully open BGE-M3 stack (BGE-M3 dense encoder + bge-reranker-v2-m3, both at their fine-tune context lengths); the closed/open gap is 6.5~pp, with hybrid fusion absorbing most of the encoder-side difference (Section~\ref{sec:discussion}). (3)~Of the 30.5\% of queries hybrid RRF misses at rank 5, 73\% [Wilson 95\% CI: 64--81\%, $n=100$] fail because the answer sits in a table cell that linearized-text encoders cannot recover; ColBERTv2 lifts dense retrieval substantially but does not absorb this failure mode. (4)~HyDE and multi-query expansion hurt on numerical queries (hallucinated figures pull the query embedding off-target), while a cross-encoder reranker on a candidate pool of $\geq 50$ is the single largest improvement we measured (+12.1~pp R@5 over Hybrid RRF). All comparisons use paired bootstrap tests with Bonferroni correction. We release evaluation code, prompts, FAISS indices, and per-query outputs.
 \end{abstract}
 
-\noindent\textbf{Keywords:} retrieval-augmented generation; retrieval evaluation; hybrid retrieval; cross-encoder reranking; text-and-table documents; financial QA.
+\noindent\textbf{Keywords:} retrieval-augmented generation; retrieval evaluation; hybrid retrieval; cross-encoder reranking; text-and-table documents; financial QA; error taxonomy.
 
 % ============================================================
 \section{Introduction}
