@@ -1,10 +1,10 @@
 # From BM25 to Corrective RAG: Benchmarking Retrieval Strategies for Text-and-Table Documents
 
-> Comprehensive benchmark of 10 RAG retrieval methods on [T2-RAGBench](https://huggingface.co/datasets/G4KMU/t2-ragbench) (23,088 financial QA pairs, 7,318 documents with text + tables).
+> Comprehensive benchmark of nine RAG retrieval configurations on [T2-RAGBench](https://huggingface.co/datasets/G4KMU/t2-ragbench) (23,088 financial QA pairs, 7,318 documents with text + tables), with a BGE-M3 robustness panel and a ColBERTv2 late-interaction follow-up.
 
 **Authors:** Meftun Akarsu (THI) · Christopher Mierbach (Radiate)
 
-**Paper:** [LaTeX source](paper/main.tex) · **Dataset:** [T2-RAGBench on HuggingFace](https://huggingface.co/datasets/G4KMU/t2-ragbench)
+**Paper:** [LaTeX source](paper_neurips/main.tex) · **Dataset:** [T2-RAGBench on HuggingFace](https://huggingface.co/datasets/G4KMU/t2-ragbench)
 
 ---
 
@@ -284,14 +284,17 @@ rag_research_paper/
 │   └── evaluation/       # Retrieval + generation metrics + statistical tests
 ├── configs/default.yaml  # All hyperparameters
 ├── scripts/
-│   ├── run_experiment.py
-│   ├── run_all_experiments.py
-│   ├── analyze_results.py
+│   ├── run_experiment.py        # single-run driver (BM25/Dense/Hybrid/HyDE/...)
+│   ├── run_colbertv2.py         # ColBERTv2 late-interaction driver
+│   ├── run_h100_experiment.sh   # full bootstrap (BGE-M3 panel + ColBERTv2)
+│   ├── generate_figures.py      # regenerate paper figures
+│   ├── aggregate_bge_m3.py      # paper-paste Markdown tables
+│   ├── bge_m3_stats.py          # paired-bootstrap significance tests
 │   └── sanity_check.py
 └── data/
-    ├── raw/              # T2-RAGBench (auto-downloaded)
-    ├── processed/        # FAISS indices, embeddings
-    └── results/          # Experiment JSONs
+    ├── raw/              # T2-RAGBench (auto-downloaded; gitignored)
+    ├── indexes/          # FAISS / ColBERT indexes (gitignored)
+    └── results/          # Experiment JSONs (gitignored)
 ```
 
 ## Setup
@@ -316,8 +319,8 @@ python scripts/sanity_check.py
 # Run a single experiment
 python scripts/run_experiment.py --method bm25 --top-k 20
 
-# Run all tier-1 experiments
-python scripts/run_all_experiments.py --tier 1
+# Full reproduction on a CUDA GPU (BGE-M3 panel + ColBERTv2 follow-up)
+bash scripts/run_h100_experiment.sh
 ```
 
 ## Models Used
@@ -325,9 +328,12 @@ python scripts/run_all_experiments.py --tier 1
 | Model | Provider | Purpose |
 |-------|----------|---------|
 | text-embedding-3-large | Azure OpenAI | Document & query embedding |
-| GPT-4.1-mini | Azure OpenAI | HyDE, Multi-Query, CRAG, Contextual Retrieval |
-| GPT-5.4 | Azure OpenAI | Generation comparison, error analysis |
-| Cohere Rerank v4.0 Pro | Azure AI | Cross-encoder reranking |
+| GPT-4.1-mini | Azure OpenAI | HyDE, Multi-Query, CRAG, Contextual Retrieval, generation |
+| GPT-5.4 | Azure OpenAI | Error taxonomy labelling |
+| Cohere Rerank v4.0 Pro | Azure AI | Closed-stack cross-encoder reranking |
+| BAAI/bge-m3 | Local (CUDA) | Open-weight dense encoder (BGE-M3 panel) |
+| BAAI/bge-reranker-v2-m3 | Local (CUDA) | Open-weight cross-encoder reranking at max\_length=1024 |
+| colbert-ir/colbertv2.0 | Local (CUDA) | Late-interaction follow-up |
 
 ## Citation
 
