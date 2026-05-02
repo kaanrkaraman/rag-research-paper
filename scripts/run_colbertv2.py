@@ -27,11 +27,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from tqdm import tqdm
 
 from src.data_loader import load_t2ragbench
 from src.evaluation.retrieval_metrics import (
@@ -48,6 +53,56 @@ from src.utils.common import (
 )
 
 logger = get_logger(__name__)
+
+
+def _dir_size_files(path: Path) -> tuple[float, int]:
+    """Return (size_in_MB, file_count) for a directory tree, 0/0 if missing."""
+    if not path.exists():
+        return 0.0, 0
+    total = 0
+    n = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+                n += 1
+            except OSError:
+                pass
+    return total / (1024 * 1024), n
+
+
+def _gpu_status() -> str:
+    """One-line GPU utilization summary; "n/a" if nvidia-smi unavailable."""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        ).strip().split(",")
+        util, used, total = (s.strip() for s in out)
+        return f"gpu={util}% mem={used}/{total}MB"
+    except Exception:
+        return "gpu=n/a"
+
+
+def _heartbeat(stop_event: threading.Event, watch_dir: Path,
+               label: str, interval_s: int = 30) -> None:
+    """Print a one-line liveness signal every interval_s while stop_event is unset.
+
+    The indexing phase is otherwise silent for tens of minutes (ragatouille
+    builds PLAID centroids and writes shards internally). This thread surfaces
+    GPU activity + on-disk index growth so the user can tell whether progress
+    is still being made.
+    """
+    t0 = time.time()
+    while not stop_event.wait(interval_s):
+        elapsed = int(time.time() - t0)
+        size_mb, files = _dir_size_files(watch_dir)
+        print(
+            f"[heartbeat {label}] elapsed={elapsed//60:>3d}m{elapsed%60:02d}s  "
+            f"{_gpu_status()}  index={size_mb:>7.1f}MB ({files} files)",
+            flush=True,
+        )
 
 INDEX_ROOT = Path(__file__).parent.parent / "data" / "indexes" / "colbertv2"
 CHECKPOINT = "colbert-ir/colbertv2.0"
@@ -137,18 +192,35 @@ def main():
         logger.info(f"Loading cached ColBERTv2 index at {index_dir}")
         rag = RAGPretrainedModel.from_index(str(index_dir))
     else:
-        logger.info(f"Building ColBERTv2 index from checkpoint {CHECKPOINT}")
-        with index_timer:
-            rag = RAGPretrainedModel.from_pretrained(CHECKPOINT, index_root=str(INDEX_ROOT))
-            rag.index(
-                collection=doc_texts,
-                document_ids=doc_ids,
-                index_name=INDEX_NAME,
-                max_document_length=args.max_document_length,
-                split_documents=True,
-                bsize=args.bsize,
-            )
-        logger.info(f"Indexing finished in {index_timer.elapsed:.1f}s")
+        print(f"[colbertv2] Building index from {CHECKPOINT} over "
+              f"{len(doc_texts)} documents (passage_len={args.max_document_length}, "
+              f"bsize={args.bsize}). This phase is normally silent for tens of "
+              f"minutes; the heartbeat thread below prints liveness every 30s.",
+              flush=True)
+        stop_hb = threading.Event()
+        hb = threading.Thread(
+            target=_heartbeat,
+            args=(stop_hb, index_dir, "indexing", 30),
+            daemon=True,
+        )
+        hb.start()
+        try:
+            with index_timer:
+                rag = RAGPretrainedModel.from_pretrained(CHECKPOINT, index_root=str(INDEX_ROOT))
+                rag.index(
+                    collection=doc_texts,
+                    document_ids=doc_ids,
+                    index_name=INDEX_NAME,
+                    max_document_length=args.max_document_length,
+                    split_documents=True,
+                    bsize=args.bsize,
+                )
+        finally:
+            stop_hb.set()
+            hb.join(timeout=5)
+        size_mb, n_files = _dir_size_files(index_dir)
+        print(f"[colbertv2] Indexing finished in {index_timer.elapsed:.1f}s "
+              f"({size_mb:.1f}MB across {n_files} files)", flush=True)
 
     # ---------- Retrieval ----------
     passages_per_query = max(args.top_k * args.passage_oversample, 50)
@@ -157,9 +229,12 @@ def main():
     per_query: list[dict] = []
     latencies_ms: list[float] = []
 
-    logger.info(f"Retrieving top-{args.top_k} docs per query "
-                f"(oversample {passages_per_query} passages)")
-    for i, qa in enumerate(qa_items):
+    print(f"[colbertv2] Retrieving top-{args.top_k} docs per query "
+          f"(oversample {passages_per_query} passages over {len(qa_items)} queries)",
+          flush=True)
+    pbar = tqdm(qa_items, desc="ColBERTv2 retrieval", mininterval=2.0,
+                miniters=10, dynamic_ncols=True)
+    for qa in pbar:
         t0 = time.perf_counter()
         passage_hits = rag.search(query=qa.question, k=passages_per_query)
         retrieved = _passages_to_doc_ranking(passage_hits, args.top_k)
@@ -179,8 +254,12 @@ def main():
         })
         latencies_ms.append(latency_ms)
 
-        if (i + 1) % 1000 == 0 or i + 1 == len(qa_items):
-            logger.info(f"  {i+1}/{len(qa_items)} queries done")
+        # Lightweight running R@5 in the bar so the user sees quality drift,
+        # not just throughput. Updated every 100 queries to keep cost trivial.
+        if len(per_query) % 100 == 0:
+            running_r5 = sum(r.get("recall@5", 0.0) for r in per_query) / len(per_query)
+            pbar.set_postfix(R5=f"{running_r5:.3f}", lat_ms=f"{latency_ms:.0f}")
+    pbar.close()
 
     # ---------- Aggregate metrics ----------
     retrieval_metrics = compute_retrieval_metrics(all_retrieved, all_relevant_ids)
